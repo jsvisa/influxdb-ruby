@@ -12,7 +12,7 @@ module InfluxDB
                   :username,
                   :password,
                   :database,
-                  :time_precision,
+                  :precision,
                   :auth_method,
                   :use_ssl,
                   :verify_ssl,
@@ -37,8 +37,6 @@ module InfluxDB
     #
     #     Influxdb::Client.new 'db', :username => 'username' # override username, use 'db' as the db name
     #
-    #     Influxdb::Client.new 'db', :path => '/prefix'      # use the specified path prefix when building the
-    #                                                        # url e.g.: /prefix/db/dbname...
     #
     # === Valid options in hash
     #
@@ -54,14 +52,13 @@ module InfluxDB
       opts = args.last.is_a?(Hash) ? args.last : {}
       @hosts = Array(opts[:hosts] || opts[:host] || ["localhost"])
       @port = opts[:port] || 8086
-      @path = opts[:path] || ""
       @username = opts[:username] || "root"
       @password = opts[:password] || "root"
       @auth_method = %w{params basic_auth}.include?(opts[:auth_method]) ? opts[:auth_method] : "params"
       @use_ssl = opts[:use_ssl] || false
       @verify_ssl = opts.fetch(:verify_ssl, true)
       @ssl_ca_cert = opts[:ssl_ca_cert] || false
-      @time_precision = opts[:time_precision] || "s"
+      @precision = opts[:precision] || "s"
       @initial_delay = opts[:initial_delay] || 0.01
       @max_delay = opts[:max_delay] || 30
       @open_timeout = opts[:write_timeout] || 5
@@ -87,194 +84,64 @@ module InfluxDB
       get "/ping"
     end
 
-    ## allow options, e.g. influxdb.create_database('foo', replicationFactor: 3)
-    def create_database(name, options = {})
-      url = full_url("/cluster/database_configs/#{name}")
-      data = JSON.generate(options)
-      post(url, data)
+    ## allow options, e.g. influxdb.create_database('foo')
+    def create_database(name)
+      query "CREATE DATABASE #{name}"
     end
 
     def delete_database(name)
-      delete full_url("/db/#{name}")
+      query "DROP DATABASE #{name}"
     end
 
     def get_database_list
-      get full_url("/db")
-    end
-
-    def authenticate_cluster_admin
-      get(full_url('/cluster_admins/authenticate'), true)
+      query 'SHOW DATABASES'
     end
 
     def create_cluster_admin(username, password)
-      url = full_url("/cluster_admins")
-      data = JSON.generate({:name => username, :password => password})
-      post(url, data)
-    end
-
-    def update_cluster_admin(username, password)
-      url = full_url("/cluster_admins/#{username}")
-      data = JSON.generate({:password => password})
-      post(url, data)
-    end
-
-    def delete_cluster_admin(username)
-      delete full_url("/cluster_admins/#{username}")
+      query "CREATE USER #{username} WITH PASSWORD '#{password}' WITH ALL PRIVILEGES"
     end
 
     def get_cluster_admin_list
-      get full_url("/cluster_admins")
+      query "SHOW USERS"
     end
 
-    def authenticate_database_user(database)
-      get(full_url("/db/#{database}/authenticate"), true)
+    def create_user(username, password)
+      query "CREATE USER #{username} WITH PASSWORD '#{password}'"
     end
 
-    def create_database_user(database, username, password, options={})
-      url = full_url("/db/#{database}/users")
-      data = JSON.generate({:name => username, :password => password}.merge(options))
-      post(url, data)
+    def delete_user(username)
+      query "DROP USER #{username}"
     end
 
-    def update_database_user(database, username, options = {})
-      url = full_url("/db/#{database}/users/#{username}")
-      data = JSON.generate(options)
-      post(url, data)
+    def get_user_list
+      query "SHOW USERS"
     end
 
-    def delete_database_user(database, username)
-      delete full_url("/db/#{database}/users/#{username}")
-    end
-
-    def get_database_user_list(database)
-      get full_url("/db/#{database}/users")
-    end
-
-    def get_database_user_info(database, username)
-      get full_url("/db/#{database}/users/#{username}")
-    end
-
-    def alter_database_privilege(database, username, admin=true)
-      update_database_user(database, username, :admin => admin)
-    end
-
-    # NOTE: Only cluster admin can call this
-    def continuous_queries(database)
-      get full_url("/db/#{database}/continuous_queries")
-    end
-
-    def get_shard_list()
-      get full_url("/cluster/shards")
-    end
-
-    def delete_shard(shard_id, server_ids)
-      data = JSON.generate({"serverIds" => server_ids})
-      delete full_url("/cluster/shards/#{shard_id}"), data
-    end
-
-    # EXAMPLE:
-    #
-    # db.create_continuous_query(
-    #   "select mean(sys) as sys, mean(usr) as usr from cpu group by time(15m)",
-    #   "cpu.15m",
-    # )
-    #
-    # NOTE: Only cluster admin can call this
-    def create_continuous_query(query, name)
-      query("#{query} into #{name}")
-    end
-
-    # NOTE: Only cluster admin can call this
-    def get_continuous_query_list
-      query("list continuous queries")
-    end
-    
-    # NOTE: Only cluster admin can call this
-    def delete_continuous_query(id)
-      query("drop continuous query #{id}")
-    end
-
-    def get_shard_space_list
-      get full_url("/cluster/shard_spaces")
-    end
-
-    def get_shard_space(database_name, shard_space_name)
-      get_shard_space_list.find do |shard_space|
-        shard_space["database"] == database_name &&
-          shard_space["name"] == shard_space_name
-      end
-    end
-
-    def create_shard_space(database_name, options = {})
-      url  = full_url("/cluster/shard_spaces/#{database_name}")
-      data = JSON.generate(default_shard_space_options.merge(options))
-
-      post(url, data)
-    end
-
-    def delete_shard_space(database_name, shard_space_name)
-      delete full_url("/cluster/shard_spaces/#{database_name}/#{shard_space_name}")
-    end
-
-    ## Get the shard space first, so the user doesn't have to specify the existing options
-    def update_shard_space(database_name, shard_space_name, options)
-      shard_space_options = get_shard_space(database_name, shard_space_name)
-      shard_space_options.delete("database")
-
-      url  = full_url("/cluster/shard_spaces/#{database_name}/#{shard_space_name}")
-      data = JSON.generate(shard_space_options.merge(options))
-
-      post(url, data)
-    end
-
-    def default_shard_space_options
-      {
-        "name"              => "default",
-        "regEx"             => "/.*/",
-        "retentionPolicy"   => "inf",
-        "shardDuration"     => "7d",
-        "replicationFactor" => 1,
-        "split"             => 1
-      }
-    end
-
-    def configure_database(database_name, options = {})
-      url  = full_url("/cluster/database_configs/#{database_name}")
-      data = JSON.generate(default_database_configuration.merge(options))
-
-      post(url, data)
-    end
-
-    def default_database_configuration
-      {:spaces => [default_shard_space_options]}
-    end
-
-    def write_point(name, data, async=@async, time_precision=@time_precision)
-      write_points([{:name => name, :data => data}], async, time_precision)
+    def write_point(measurement, tags, values, async=@async, precision=@precision)
+      write_points([{:measurement => measurement, tags: tags, values: values}], async, precision)
     end
 
     # Example:
     # db.write_points(
     #     [
     #         {
-    #             name: 'first_name',
-    #             data: {
-    #                 value: 'val1'
+    #             measurement: 'cpu_load_short',
+    #             tags: {
+    #                 host: 'server01',
+    #                 region: 'us-west'
     #             }
-    #         },
-    #         {
-    #             name: 'first_name',
-    #             data: {
-    #                 value: 'val1'
+    #             values: {
+    #                 value1: 'val1'
+    #                 value2: 'val2'
     #             }
     #         }
     #     ]
     # )
-    def write_points(name_data_hashes_array, async=@async, time_precision=@time_precision)
+    def write_points(name_data_hashes_array, async=@async, precision=@precision)
 
-      payloads = []
+      payloads = ""
       name_data_hashes_array.each do |attrs|
-        payloads << generate_payload(attrs[:name], attrs[:data])
+        payloads << generate_payload(attrs[:measurement], attrs[:tags], attrs[:values])
       end
 
       if async
@@ -282,48 +149,28 @@ module InfluxDB
       elsif udp_client
         udp_client.send(payloads)
       else
-        _write(payloads, time_precision)
+        _write(payloads, precision)
       end
     end
 
-    def generate_payload(name, data)
-      data = data.is_a?(Array) ? data : [data]
-      columns = data.reduce(:merge).keys.sort {|a,b| a.to_s <=> b.to_s}
-      payload = {:name => name, :points => [], :columns => columns}
+    def generate_payload(name, tags, values)
+      tags = {} unless tags
+      columns = Hash[tags.sort].reduce("") { |memo, (k, v)| "#{memo},#{k}=#{v}" }
+      payload = "#{name}#{columns} "
 
-      data.each do |point|
-        payload[:points] << columns.inject([]) do |array, column|
-          array << InfluxDB::PointValue.new(point[column]).dump
-        end
+      values.each do |k, v|
+        payload << "#{k}=#{v}"
       end
 
       payload
     end
 
-    def _write(payload, time_precision=@time_precision)
-      url = full_url("/db/#{@database}/series", :time_precision => time_precision)
-      data = JSON.generate(payload)
-      post(url, data)
+    def _write(payload, precision=@precision)
+      post full_url("/write", :precision => precision), payload
     end
 
-    def query(query, time_precision=@time_precision)
-      url = full_url("/db/#{@database}/series", :q => query, :time_precision => time_precision)
-      series = get(url)
-
-      if block_given?
-        series.each { |s| yield s['name'], denormalize_series(s) }
-      else
-        series.reduce({}) do |col, s|
-          name                  = s['name']
-          denormalized_series   = denormalize_series s
-          col[name]             = denormalized_series
-          col
-        end
-      end
-    end
-
-    def delete_series(series)
-      delete full_url("/db/#{@database}/series/#{series}")
+    def query(query, database=@database)
+      get full_url("/query", :q => query, :database => database)
     end
 
     def stop!
@@ -344,7 +191,7 @@ module InfluxDB
 
       query = params.map { |k, v| [CGI.escape(k.to_s), "=", CGI.escape(v.to_s)].join }.join("&")
 
-      URI::Generic.build(:path => "#{@path}#{path}", :query => query).to_s
+      URI::Generic.build(:path => path, :query => query).to_s
     end
 
     def basic_auth?
@@ -360,10 +207,12 @@ module InfluxDB
           if return_response
             return response
           else
-            return JSON.parse(response.body)
+            return response.body ? JSON.parse(response.body) : true
           end
         elsif response.kind_of? Net::HTTPUnauthorized
           raise InfluxDB::AuthenticationError.new response.body
+        elsif response.kind_of? Net::HTTPBadRequest
+          raise InfluxDB::BadRequestError.new response.body
         else
           raise InfluxDB::Error.new response.body
         end
@@ -374,22 +223,6 @@ module InfluxDB
       headers = {"Content-Type" => "application/json"}
       connect_with_retry do |http|
         request = Net::HTTP::Post.new(url, headers)
-        request.basic_auth @username, @password if basic_auth?
-        response = http.request(request, data)
-        if response.kind_of? Net::HTTPSuccess
-          return response
-        elsif response.kind_of? Net::HTTPUnauthorized
-          raise InfluxDB::AuthenticationError.new response.body
-        else
-          raise InfluxDB::Error.new response.body
-        end
-      end
-    end
-
-    def delete(url, data = nil)
-      headers = {"Content-Type" => "application/json"}
-      connect_with_retry do |http|
-        request = Net::HTTP::Delete.new(url, headers)
         request.basic_auth @username, @password if basic_auth?
         response = http.request(request, data)
         if response.kind_of? Net::HTTPSuccess
